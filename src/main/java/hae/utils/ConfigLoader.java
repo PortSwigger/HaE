@@ -1,9 +1,6 @@
 package hae.utils;
 
 import burp.api.montoya.MontoyaApi;
-import burp.api.montoya.http.RequestOptions;
-import burp.api.montoya.http.message.HttpRequestResponse;
-import burp.api.montoya.http.message.requests.HttpRequest;
 import hae.Config;
 import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.Yaml;
@@ -46,7 +43,7 @@ public class ConfigLoader {
 
         File rulesFilePath = new File(this.rulesFilePath);
         if (!(rulesFilePath.exists() && rulesFilePath.isFile())) {
-            initRulesByRes();
+            initRules();
         }
 
         Config.globalRules = getRules();
@@ -77,8 +74,11 @@ public class ConfigLoader {
 
     public void initConfig() {
         Map<String, Object> r = new LinkedHashMap<>();
-        r.put("excludeSuffix", getExcludeSuffix());
-        r.put("blockHost", getBlockHost());
+        r.put("ExcludeSuffix", getExcludeSuffix());
+        r.put("BlockHost", getBlockHost());
+        r.put("ExcludeStatus", getExcludeStatus());
+        r.put("LimitSize", getLimitSize());
+        r.put("HaEScope", getScope());
         try {
             Writer ws = new OutputStreamWriter(Files.newOutputStream(Paths.get(configFilePath)), StandardCharsets.UTF_8);
             yaml.dump(r, ws);
@@ -135,39 +135,79 @@ public class ConfigLoader {
     }
 
     public String getBlockHost() {
-        File yamlSetting = new File(configFilePath);
-        if (!yamlSetting.exists() || !yamlSetting.isFile()) {
-            return Config.host;
-        }
-
-        try (InputStream inorder = Files.newInputStream(Paths.get(configFilePath))) {
-            Map<String, Object> r = new Yaml().load(inorder);
-
-            if (r.containsKey("blockHost")) {
-                return r.get("blockHost").toString();
-            }
-        } catch (Exception ignored) {
-        }
-
-        return Config.host;
+        return getValueFromConfig("BlockHost", Config.host);
     }
 
     public String getExcludeSuffix() {
+        return getValueFromConfig("ExcludeSuffix", Config.suffix);
+    }
+
+    public String getExcludeStatus() {
+        return getValueFromConfig("ExcludeStatus", Config.status);
+    }
+
+    public String getLimitSize() {
+        return getValueFromConfig("LimitSize", Config.size);
+    }
+
+    public String getScope() {
+        return getValueFromConfig("HaEScope", Config.scopeOptions);
+    }
+
+    public boolean getMode() {
+        return getValueFromConfig("HaEModeStatus", Config.modeStatus).equals("true");
+    }
+
+    private String getValueFromConfig(String name, String defaultValue) {
         File yamlSetting = new File(configFilePath);
         if (!yamlSetting.exists() || !yamlSetting.isFile()) {
-            return Config.suffix;
+            return defaultValue;
         }
 
         try (InputStream inorder = Files.newInputStream(Paths.get(configFilePath))) {
             Map<String, Object> r = new Yaml().load(inorder);
 
-            if (r.containsKey("excludeSuffix")) {
-                return r.get("excludeSuffix").toString();
+            if (r.containsKey(name)) {
+                return r.get(name).toString();
             }
         } catch (Exception ignored) {
         }
 
-        return Config.suffix;
+        return defaultValue;
+    }
+
+    public void setExcludeSuffix(String excludeSuffix) {
+        setValueToConfig("ExcludeSuffix", excludeSuffix);
+    }
+
+    public void setBlockHost(String blockHost) {
+        setValueToConfig("BlockHost", blockHost);
+    }
+
+    public void setExcludeStatus(String status) {
+        setValueToConfig("ExcludeStatus", status);
+    }
+
+    public void setLimitSize(String size) {
+        setValueToConfig("LimitSize", size);
+    }
+
+    public void setScope(String scope) {
+        setValueToConfig("HaEScope", scope);
+    }
+
+    public void setMode(String mode) {
+        setValueToConfig("HaEModeStatus", mode);
+    }
+
+    private void setValueToConfig(String name, String value) {
+        Map<String, Object> currentConfig = loadCurrentConfig();
+        currentConfig.put(name, value);
+
+        try (Writer ws = new OutputStreamWriter(Files.newOutputStream(Paths.get(configFilePath)), StandardCharsets.UTF_8)) {
+            yaml.dump(currentConfig, ws);
+        } catch (Exception ignored) {
+        }
     }
 
     private Map<String, Object> loadCurrentConfig() {
@@ -183,31 +223,12 @@ public class ConfigLoader {
         }
     }
 
-    public void setExcludeSuffix(String excludeSuffix) {
-        Map<String, Object> currentConfig = loadCurrentConfig();
-        currentConfig.put("excludeSuffix", excludeSuffix); // 更新配置
-
-        try (Writer ws = new OutputStreamWriter(Files.newOutputStream(Paths.get(configFilePath)), StandardCharsets.UTF_8)) {
-            yaml.dump(currentConfig, ws);
-        } catch (Exception ignored) {
-        }
-    }
-
-    public void setBlockHost(String blockHost) {
-        Map<String, Object> currentConfig = loadCurrentConfig();
-        currentConfig.put("blockHost", blockHost); // 更新配置
-
-        try (Writer ws = new OutputStreamWriter(Files.newOutputStream(Paths.get(configFilePath)), StandardCharsets.UTF_8)) {
-            yaml.dump(currentConfig, ws);
-        } catch (Exception ignored) {
-        }
-    }
-
-    public void initRulesByRes() {
-        boolean isCopySuccess = copyRulesToFile(this.rulesFilePath);
-        if (!isCopySuccess) {
+    public boolean initRules() {
+        boolean ret = copyRulesToFile(this.rulesFilePath);
+        if (!ret) {
             api.extension().unload();
         }
+        return ret;
     }
 
     private boolean copyRulesToFile(String targetFilePath) {
@@ -229,34 +250,5 @@ public class ConfigLoader {
         }
 
         return false;
-    }
-
-    public void initRulesByNet() {
-        Thread t = new Thread() {
-            public void run() {
-                pullRules();
-            }
-        };
-        t.start();
-        try {
-            t.join(10000);
-        } catch (Exception ignored) {
-        }
-    }
-
-    private void pullRules() {
-        try {
-            String url = "https://raw.githubusercontent.com/gh0stkey/HaE/gh-pages/Rules.yml";
-            HttpRequest httpRequest = HttpRequest.httpRequestFromUrl(url);
-            HttpRequestResponse requestResponse = api.http().sendRequest(httpRequest, RequestOptions.requestOptions().withUpstreamTLSVerification());
-            String responseBody = requestResponse.response().bodyToString();
-            if (responseBody.contains("rules")) {
-                FileOutputStream fileOutputStream = new FileOutputStream(rulesFilePath);
-                fileOutputStream.write(responseBody.getBytes());
-                fileOutputStream.close();
-            }
-        } catch (Exception ignored) {
-            api.extension().unload();
-        }
     }
 }
