@@ -1,17 +1,18 @@
 package hae.component.board.message;
 
 import burp.api.montoya.MontoyaApi;
-import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.http.message.HttpHeader;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
+import burp.api.montoya.persistence.PersistedObject;
 import burp.api.montoya.ui.UserInterface;
 import burp.api.montoya.ui.editor.HttpRequestEditor;
 import burp.api.montoya.ui.editor.HttpResponseEditor;
 import hae.Config;
 import hae.cache.CachePool;
-import hae.utils.project.FileProcessor;
+import hae.utils.ConfigLoader;
+import hae.utils.DataManager;
 import hae.utils.string.HashCalculator;
 import hae.utils.string.StringProcessor;
 
@@ -23,6 +24,8 @@ import javax.swing.table.TableRowSorter;
 import java.nio.charset.StandardCharsets;
 import java.text.MessageFormat;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
@@ -30,15 +33,17 @@ import static burp.api.montoya.ui.editor.EditorOptions.READ_ONLY;
 
 public class MessageTableModel extends AbstractTableModel {
     private final MontoyaApi api;
+    private final ConfigLoader configLoader;
     private final MessageTable messageTable;
     private final JSplitPane splitPane;
     private final LinkedList<MessageEntry> log = new LinkedList<>();
     private final LinkedList<MessageEntry> filteredLog;
     private SwingWorker<Void, Void> currentWorker;
 
-    public MessageTableModel(MontoyaApi api) {
+    public MessageTableModel(MontoyaApi api, ConfigLoader configLoader) {
         this.filteredLog = new LinkedList<>();
         this.api = api;
+        this.configLoader = configLoader;
 
         JTabbedPane messageTab = new JTabbedPane();
         UserInterface userInterface = api.userInterface();
@@ -93,10 +98,10 @@ public class MessageTableModel extends AbstractTableModel {
         splitPane.setRightComponent(messageTab);
     }
 
-    public void add(HttpRequestResponse messageInfo, String url, String method, String status, String length, String comment, String color, String hash, String path) {
+    public void add(HttpRequestResponse messageInfo, String url, String method, String status, String length, String comment, String color, boolean flag) {
         synchronized (log) {
             boolean isDuplicate = false;
-            MessageEntry logEntry = new MessageEntry(messageInfo, method, url, comment, length, color, status, hash, path);
+            MessageEntry logEntry = new MessageEntry(messageInfo, method, url, comment, length, color, status);
 
             byte[] reqByteA = new byte[0];
             byte[] resByteA = new byte[0];
@@ -130,6 +135,22 @@ public class MessageTableModel extends AbstractTableModel {
             }
 
             if (!isDuplicate) {
+                if (flag) {
+                    try {
+                        DataManager dataManager = new DataManager(api);
+                        // 数据存储在BurpSuite空间内
+                        PersistedObject persistedObject = PersistedObject.persistedObject();
+                        persistedObject.setHttpRequestResponse("messageInfo", messageInfo);
+                        persistedObject.setString("comment", comment);
+                        persistedObject.setString("color", color);
+                        String uuidIndex = StringProcessor.getRandomUUID();
+                        dataManager.putData("message", uuidIndex, persistedObject);
+                    } catch (Exception ignored) {
+
+                    }
+                }
+
+                // 添加进日志
                 log.add(logEntry);
             }
         }
@@ -173,44 +194,15 @@ public class MessageTableModel extends AbstractTableModel {
         filteredLog.clear();
 
         log.forEach(entry -> {
-            MessageEntry finalEntry = getEntryByFile(entry);
-            String host = StringProcessor.getHostByUrl(finalEntry.getUrl());
+            String host = StringProcessor.getHostByUrl(entry.getUrl());
             if (!host.isEmpty()) {
                 if (StringProcessor.matchesHostPattern(host, filterText) || filterText.contains("*")) {
-                    filteredLog.add(finalEntry);
+                    filteredLog.add(entry);
                 }
             }
         });
 
         fireTableDataChanged();
-    }
-
-    private MessageEntry getEntryByFile(MessageEntry entry) {
-        HttpRequestResponse requestResponse = entry.getRequestResponse();
-        if (requestResponse == null) {
-            String url = entry.getUrl();
-            String method = entry.getMethod();
-            String status = entry.getStatus();
-            String comment = entry.getComment();
-            String color = entry.getColor();
-            String path = entry.getPath();
-            String hash = entry.getHash();
-            int length = Integer.parseInt(entry.getLength());
-
-            byte[] contents = FileProcessor.readFileContent(path, hash);
-
-            if (contents.length > length) {
-                byte[] response = Arrays.copyOf(contents, length);
-                byte[] request = Arrays.copyOfRange(contents, length, contents.length);
-                requestResponse = StringProcessor.createHttpRequestResponse(url, request, response);
-
-                int index = log.indexOf(entry);
-                entry = new MessageEntry(requestResponse, method, url, comment, String.valueOf(length), color, status, "", "");
-                log.set(index, entry);
-            }
-        }
-
-        return entry;
     }
 
     public void applyMessageFilter(String tableName, String filterText) {
@@ -435,7 +427,7 @@ public class MessageTableModel extends AbstractTableModel {
 
     public class MessageTable extends JTable {
         private MessageEntry messageEntry;
-        private SwingWorker<Object, Void> currentWorker;
+        private final ExecutorService executorService;
         private int lastSelectedIndex = -1;
         private final HttpRequestEditor requestEditor;
         private final HttpResponseEditor responseEditor;
@@ -444,41 +436,31 @@ public class MessageTableModel extends AbstractTableModel {
             super(messageTableModel);
             this.requestEditor = requestEditor;
             this.responseEditor = responseEditor;
+            this.executorService = Executors.newSingleThreadExecutor();
         }
 
         @Override
         public void changeSelection(int row, int col, boolean toggle, boolean extend) {
             super.changeSelection(row, col, toggle, extend);
-
-            requestEditor.setRequest(HttpRequest.httpRequest("Loading..."));
-            responseEditor.setResponse(HttpResponse.httpResponse("Loading..."));
-
-            if (currentWorker != null && !currentWorker.isDone()) {
-                currentWorker.cancel(true);
+            int selectedIndex = convertRowIndexToModel(row);
+            if (lastSelectedIndex != selectedIndex) {
+                lastSelectedIndex = selectedIndex;
+                executorService.execute(this::getSelectedMessage);
             }
+        }
 
-            currentWorker = new SwingWorker<>() {
-                @Override
-                protected Void doInBackground() {
-                    int selectedIndex = convertRowIndexToModel(row);
-                    if (lastSelectedIndex != selectedIndex) {
-                        lastSelectedIndex = selectedIndex;
-                        messageEntry = filteredLog.get(selectedIndex);
+        private void getSelectedMessage() {
+            messageEntry = filteredLog.get(lastSelectedIndex);
 
-                        HttpRequestResponse httpRequestResponse = messageEntry.getRequestResponse();
+            HttpRequestResponse httpRequestResponse = messageEntry.getRequestResponse();
 
-                        ByteArray requestByte = httpRequestResponse.request().toByteArray();
-                        ByteArray responseByte = httpRequestResponse.response().toByteArray();
-
-                        requestEditor.setRequest(HttpRequest.httpRequest(messageEntry.getRequestResponse().httpService(), requestByte));
-                        responseEditor.setResponse(HttpResponse.httpResponse(responseByte));
-
-                    }
-
-                    return null;
-                }
-            };
-            currentWorker.execute();
+            requestEditor.setRequest(HttpRequest.httpRequest(messageEntry.getRequestResponse().httpService(), httpRequestResponse.request().toByteArray()));
+            int responseSizeWithMb = httpRequestResponse.response().toString().length() / 1024 / 1024;
+            if ((responseSizeWithMb < Integer.parseInt(configLoader.getLimitSize())) || configLoader.getLimitSize().equals("0")) {
+                responseEditor.setResponse(httpRequestResponse.response());
+            } else {
+                responseEditor.setResponse(HttpResponse.httpResponse("Exceeds length limit."));
+            }
         }
     }
 }

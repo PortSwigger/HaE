@@ -1,7 +1,8 @@
-package hae.component.board;
+package hae.component.board.table;
 
 import burp.api.montoya.MontoyaApi;
 import hae.component.board.message.MessageTableModel;
+import hae.utils.ConfigLoader;
 import hae.utils.UIEnhancer;
 
 import javax.swing.*;
@@ -15,35 +16,44 @@ import java.awt.datatransfer.Clipboard;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.regex.Pattern;
 
 public class Datatable extends JPanel {
     private final MontoyaApi api;
+    private final ConfigLoader configLoader;
     private final JTable dataTable;
     private final DefaultTableModel dataTableModel;
     private final JTextField searchField;
+    private final JTextField secondSearchField;
     private final TableRowSorter<DefaultTableModel> sorter;
     private final JCheckBox searchMode = new JCheckBox("Reverse search");
+    private final JCheckBox regexMode = new JCheckBox("Regex mode");
     private final String tabName;
+    private final JPanel footerPanel;
 
-    public Datatable(MontoyaApi api, String tabName, List<String> dataList) {
+    public Datatable(MontoyaApi api, ConfigLoader configLoader, String tabName, List<String> dataList) {
         this.api = api;
+        this.configLoader = configLoader;
         this.tabName = tabName;
 
         String[] columnNames = {"#", "Information"};
+        this.dataTableModel = new DefaultTableModel(columnNames, 0);
 
-        dataTableModel = new DefaultTableModel(columnNames, 0);
-        dataTable = new JTable(dataTableModel);
-        sorter = new TableRowSorter<>(dataTableModel);
-
-        searchField = new JTextField();
+        this.dataTable = new JTable(dataTableModel);
+        this.sorter = new TableRowSorter<>(dataTableModel);
+        this.searchField = new JTextField(10);
+        this.secondSearchField = new JTextField(10);
+        this.footerPanel = new JPanel(new BorderLayout(0, 5));
 
         initComponents(dataList);
     }
 
     private void initComponents(List<String> dataList) {
+        dataTable.setRowSorter(sorter);
+
         // 设置ID排序
         sorter.setComparator(0, new Comparator<Integer>() {
             @Override
@@ -52,22 +62,33 @@ public class Datatable extends JPanel {
             }
         });
 
-        dataTable.setRowSorter(sorter);
-        TableColumn idColumn = dataTable.getColumnModel().getColumn(0);
-        idColumn.setMaxWidth(50);
-
         for (String item : dataList) {
             if (!item.isEmpty()) {
                 addRowToTable(new Object[]{item});
             }
         }
 
-        // 设置灰色默认文本
-        String searchText = "Search";
-        UIEnhancer.setTextFieldPlaceholder(searchField, searchText);
-
-        // 监听输入框内容输入、更新、删除
+        UIEnhancer.setTextFieldPlaceholder(searchField, "Search");
         searchField.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) {
+                performSearch();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent e) {
+                performSearch();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent e) {
+                performSearch();
+            }
+
+        });
+
+        UIEnhancer.setTextFieldPlaceholder(secondSearchField, "Second search");
+        secondSearchField.getDocument().addDocumentListener(new DocumentListener() {
             @Override
             public void insertUpdate(DocumentEvent e) {
                 performSearch();
@@ -89,35 +110,51 @@ public class Datatable extends JPanel {
         JScrollPane scrollPane = new JScrollPane(dataTable);
         scrollPane.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_ALWAYS);
 
-        searchMode.addItemListener(e -> performSearch());
+        TableColumn idColumn = dataTable.getColumnModel().getColumn(0);
+        idColumn.setPreferredWidth(50);
+        idColumn.setMaxWidth(100);
 
         setLayout(new BorderLayout(0, 5));
 
         JPanel optionsPanel = new JPanel();
-        optionsPanel.setBorder(BorderFactory.createEmptyBorder(2, 3, 5, 5));
         optionsPanel.setLayout(new BoxLayout(optionsPanel, BoxLayout.X_AXIS));
 
-        // 新增复选框要在这修改rows
-        JPanel menuPanel = new JPanel(new GridLayout(1, 1));
-        menuPanel.setBorder(BorderFactory.createEmptyBorder(3, 3, 3, 3));
-        JPopupMenu menu = new JPopupMenu();
-        menuPanel.add(searchMode);
-        menu.add(menuPanel);
+        // Settings按钮
+        JPanel settingMenuPanel = new JPanel(new GridLayout(2, 1));
+        settingMenuPanel.setBorder(BorderFactory.createEmptyBorder(3, 3, 3, 3));
+        JPopupMenu settingMenu = new JPopupMenu();
+        settingMenuPanel.add(searchMode);
+        settingMenuPanel.add(regexMode);
+        regexMode.setSelected(true);
+        searchMode.addItemListener(e -> performSearch());
+        settingMenu.add(settingMenuPanel);
 
         JButton settingsButton = new JButton("Settings");
-        settingsButton.addActionListener(e -> {
-            int x = settingsButton.getX();
-            int y = settingsButton.getY() - menu.getPreferredSize().height;
-            menu.show(settingsButton, x, y);
-        });
+        setMenuShow(settingMenu, settingsButton);
 
         optionsPanel.add(settingsButton);
         optionsPanel.add(Box.createHorizontalStrut(5));
         optionsPanel.add(searchField);
+        optionsPanel.add(Box.createHorizontalStrut(5));
+        optionsPanel.add(secondSearchField);
+
+        footerPanel.setBorder(BorderFactory.createEmptyBorder(2, 3, 5, 3));
+        footerPanel.add(optionsPanel, BorderLayout.CENTER);
 
         add(scrollPane, BorderLayout.CENTER);
-        add(optionsPanel, BorderLayout.SOUTH);
+        add(footerPanel, BorderLayout.SOUTH);
     }
+
+    private void setMenuShow(JPopupMenu menu, JButton button) {
+        button.addActionListener(e -> {
+            Point buttonLocation = button.getLocationOnScreen();
+            Dimension menuSize = menu.getPreferredSize();
+            int x = buttonLocation.x + (button.getWidth() - menuSize.width) / 2;
+            int y = buttonLocation.y - menuSize.height;
+            menu.show(button, x - buttonLocation.x, y - buttonLocation.y);
+        });
+    }
+
 
     private void addRowToTable(Object[] data) {
         int rowCount = dataTableModel.getRowCount();
@@ -129,27 +166,44 @@ public class Datatable extends JPanel {
     }
 
     private void performSearch() {
+        RowFilter<Object, Object> firstRowFilter = getObjectObjectRowFilter(searchField, true);
+        RowFilter<Object, Object> secondRowFilter = getObjectObjectRowFilter(secondSearchField, false);
         if (searchField.getForeground().equals(Color.BLACK)) {
-            RowFilter<Object, Object> rowFilter = new RowFilter<Object, Object>() {
-                public boolean include(Entry<?, ?> entry) {
-                    String searchFieldTextText = searchField.getText();
+            sorter.setRowFilter(firstRowFilter);
+            if (secondSearchField.getForeground().equals(Color.BLACK)) {
+                List<RowFilter<Object, Object>> filters = new ArrayList<>();
+                filters.add(firstRowFilter);
+                filters.add(secondRowFilter);
+                sorter.setRowFilter(RowFilter.andFilter(filters));
+            }
+        }
+    }
+
+    private RowFilter<Object, Object> getObjectObjectRowFilter(JTextField searchField, boolean firstFlag) {
+        return new RowFilter<Object, Object>() {
+            public boolean include(Entry<?, ?> entry) {
+                String searchFieldTextText = searchField.getText();
+                searchFieldTextText = searchFieldTextText.toLowerCase();
+                String entryValue = ((String) entry.getValue(1)).toLowerCase();
+                boolean filterReturn = searchFieldTextText.isEmpty();
+                boolean firstFlagReturn = searchMode.isSelected() && firstFlag;
+                if (regexMode.isSelected()) {
                     Pattern pattern = null;
                     try {
                         pattern = Pattern.compile(searchFieldTextText, Pattern.CASE_INSENSITIVE);
                     } catch (Exception ignored) {
                     }
 
-                    String entryValue = ((String) entry.getValue(1)).toLowerCase();
-                    searchFieldTextText = searchFieldTextText.toLowerCase();
                     if (pattern != null) {
-                        return searchFieldTextText.isEmpty() || pattern.matcher(entryValue).find() != searchMode.isSelected();
-                    } else {
-                        return searchFieldTextText.isEmpty() || entryValue.contains(searchFieldTextText) != searchMode.isSelected();
+                        filterReturn = filterReturn || pattern.matcher(entryValue).find() != firstFlagReturn;
                     }
+                } else {
+                    filterReturn = filterReturn || entryValue.contains(searchFieldTextText) != firstFlagReturn;
                 }
-            };
-            sorter.setRowFilter(rowFilter);
-        }
+
+                return filterReturn;
+            }
+        };
     }
 
     public void setTableListener(MessageTableModel messagePanel) {
@@ -188,17 +242,18 @@ public class Datatable extends JPanel {
         StringBuilder selectData = new StringBuilder();
 
         for (int row : selectRows) {
-            selectData.append(table.getValueAt(row, 1).toString()).append("\n");
+            selectData.append(table.getValueAt(row, 1).toString()).append("\r\n");
         }
 
         if (!selectData.isEmpty()) {
-            selectData.deleteCharAt(selectData.length() - 1);
+            selectData.delete(selectData.length() - 2, selectData.length());
         } else {
             return "";
         }
 
         return selectData.toString();
     }
+
 
     public JTable getDataTable() {
         return this.dataTable;
